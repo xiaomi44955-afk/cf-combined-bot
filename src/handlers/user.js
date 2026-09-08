@@ -2,7 +2,7 @@
  * User handler — menu navigation, content viewing, support.
  * Combined bot: messenger + uploader sections.
  */
-import { menuKeyboard, forcedJoinKeyboard } from '../services/keyboard.js';
+import { menuKeyboard, forcedJoinKeyboard, mainUserKeyboard } from '../services/keyboard.js';
 import { sendButtonContents } from '../services/content.js';
 
 const NAV_KEY = 'nav_stack';
@@ -56,7 +56,7 @@ export async function start(tg, db, update, env) {
   }
 
   // Show main user menu with two sections
-  const { mainUserKeyboard } = await import('../services/keyboard.js');
+  // mainUserKeyboard imported at top
   await tg.sendMessage(update.message.chat.id,
     `🌟 <b>خوش آمدید!</b> 🌟\n\nیکی از بخش‌های زیر را انتخاب کنید:`,
     { reply_markup: mainUserKeyboard() }
@@ -132,7 +132,7 @@ export async function menuBack(tg, db, update) {
   await db.setUserState(user.id, 'menu_nav', userData);
 
   if (parentId === 0) {
-    const { mainUserKeyboard } = await import('../services/keyboard.js');
+    // mainUserKeyboard imported at top
     await tg.sendMessage(query.message.chat.id, '🌟 <b>منوی اصلی</b>', { reply_markup: mainUserKeyboard() });
     return;
   }
@@ -146,7 +146,7 @@ export async function menuHome(tg, db, update) {
   if (!query) return;
   await tg.answerCallbackQuery(query.id);
   try { await tg.deleteMessage(query.message.chat.id, query.message.message_id); } catch {}
-  const { mainUserKeyboard } = await import('../services/keyboard.js');
+  // mainUserKeyboard imported at top
   await tg.sendMessage(query.message.chat.id, '🌟 <b>منوی اصلی</b>', { reply_markup: mainUserKeyboard() });
 }
 

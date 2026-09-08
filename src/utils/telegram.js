@@ -78,11 +78,13 @@ function bindToken(token) {
      * Send a text message. parse_mode defaults to HTML.
      */
     async sendMessage(chatId, text, opts = {}) {
+      const { reply_markup, ...rest } = opts;
       return api('sendMessage', {
         chat_id: chatId,
         text,
-        parse_mode: opts.parse_mode ?? 'HTML',
-        ...opts,
+        parse_mode: rest.parse_mode ?? 'HTML',
+        ...rest,
+        reply_markup: reply_markup ? (typeof reply_markup === 'object' ? JSON.stringify(reply_markup) : reply_markup) : undefined,
       });
     },
 
@@ -96,6 +98,8 @@ function bindToken(token) {
         message_id: messageId,
         text,
         parse_mode: opts.parse_mode ?? 'HTML',
+        reply_markup: typeof opts.reply_markup === 'object' ? JSON.stringify(opts.reply_markup) : opts.reply_markup,
+        reply_markup: typeof opts.reply_markup === 'object' ? JSON.stringify(opts.reply_markup) : opts.reply_markup,
         ...opts,
       });
     },

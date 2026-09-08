@@ -1,0 +1,1205 @@
+// ─── CF Combined Bot: Messenger + Uploader ─── Single file, no imports ───
+
+export default {
+  async fetch(request, env, ctx) {
+    if (request.method === "POST") {
+      try {
+        const payload = await request.json();
+        if (payload.message) await handleMessage(payload.message, env);
+        if (payload.callback_query) await handleCallback(payload.callback_query, env);
+      } catch (err) {
+        console.error("Error:", err);
+      }
+    }
+    return new Response("OK", { status: 200 });
+  },
+};
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// TELEGRAM API HELPERS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+async function tgApi(method, body, env) {
+  const resp = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/${method}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return resp.json();
+}
+
+async function sendMessage(chatId, text, env, extra = {}) {
+  const body = { chat_id: chatId, text, parse_mode: "HTML", ...extra };
+  if (body.reply_markup && typeof body.reply_markup !== "string") {
+    body.reply_markup = JSON.stringify(body.reply_markup);
+  }
+  return tgApi("sendMessage", body, env);
+}
+
+async function editMessageText(chatId, messageId, text, env, extra = {}) {
+  const body = { chat_id: chatId, message_id: messageId, text, parse_mode: "HTML", ...extra };
+  if (body.reply_markup && typeof body.reply_markup !== "string") {
+    body.reply_markup = JSON.stringify(body.reply_markup);
+  }
+  return tgApi("editMessageText", body, env);
+}
+
+async function deleteMessage(chatId, messageId, env) {
+  return tgApi("deleteMessage", { chat_id: chatId, message_id: messageId }, env);
+}
+
+async function answerCallback(callbackId, env, text = "") {
+  return tgApi("answerCallbackQuery", { callback_query_id: callbackId, text }, env);
+}
+
+async function forwardMessage(chatId, fromChatId, messageId, env) {
+  return tgApi("forwardMessage", {
+    chat_id: chatId,
+    from_chat_id: fromChatId,
+    message_id: messageId,
+  }, env);
+}
+
+async function sendPhoto(chatId, fileId, env, caption = "", extra = {}) {
+  const body = { chat_id: chatId, photo: fileId, caption, parse_mode: "HTML", ...extra };
+  if (body.reply_markup && typeof body.reply_markup !== "string") {
+    body.reply_markup = JSON.stringify(body.reply_markup);
+  }
+  return tgApi("sendPhoto", body, env);
+}
+
+async function sendVideo(chatId, fileId, env, caption = "", extra = {}) {
+  const body = { chat_id: chatId, video: fileId, caption, parse_mode: "HTML", ...extra };
+  if (body.reply_markup && typeof body.reply_markup !== "string") {
+    body.reply_markup = JSON.stringify(body.reply_markup);
+  }
+  return tgApi("sendVideo", body, env);
+}
+
+async function sendDocument(chatId, fileId, env, caption = "", extra = {}) {
+  const body = { chat_id: chatId, document: fileId, caption, parse_mode: "HTML", ...extra };
+  if (body.reply_markup && typeof body.reply_markup !== "string") {
+    body.reply_markup = JSON.stringify(body.reply_markup);
+  }
+  return tgApi("sendDocument", body, env);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// DATABASE HELPERS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+async function dbRun(env, sql, params = []) {
+  return env.BOT_DB.prepare(sql).bind(...params).run();
+}
+
+async function dbGet(env, sql, params = []) {
+  return env.BOT_DB.prepare(sql).bind(...params).first();
+}
+
+async function dbAll(env, sql, params = []) {
+  const result = await env.BOT_DB.prepare(sql).bind(...params).all();
+  return result.results || [];
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// DATABASE SCHEMA INIT (auto-create tables if missing)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+async function ensureTables(env) {
+  const tables = [
+    `CREATE TABLE IF NOT EXISTS users (
+      user_id INTEGER PRIMARY KEY,
+      username TEXT,
+      first_name TEXT,
+      last_name TEXT,
+      blocked INTEGER DEFAULT 0,
+      chat_mode TEXT DEFAULT 'normal'
+    )`,
+    `CREATE TABLE IF NOT EXISTS admins (
+      user_id INTEGER PRIMARY KEY,
+      role TEXT DEFAULT 'admin'
+    )`,
+    `CREATE TABLE IF NOT EXISTS buttons (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      parent_id INTEGER DEFAULT NULL,
+      name TEXT NOT NULL,
+      is_active INTEGER DEFAULT 1,
+      protect_content INTEGER DEFAULT 0,
+      order_index INTEGER DEFAULT 0
+    )`,
+    `CREATE TABLE IF NOT EXISTS button_contents (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      button_id INTEGER NOT NULL,
+      order_index INTEGER DEFAULT 0,
+      content_kind TEXT DEFAULT 'text',
+      content_text TEXT DEFAULT '',
+      content_file_id TEXT DEFAULT ''
+    )`,
+    `CREATE TABLE IF NOT EXISTS user_states (
+      user_id INTEGER PRIMARY KEY,
+      state TEXT DEFAULT '',
+      data TEXT DEFAULT ''
+    )`,
+    `CREATE TABLE IF NOT EXISTS settings (
+      key TEXT PRIMARY KEY,
+      value TEXT DEFAULT ''
+    )`,
+  ];
+  for (const sql of tables) {
+    await env.BOT_DB.prepare(sql).run();
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ADMIN CHECK
+// ═══════════════════════════════════════════════════════════════════════════════
+
+function isAdmin(userId, env) {
+  const mainId = String(env.MAIN_ADMIN_ID);
+  if (String(userId) === mainId) return true;
+  if (env.ADMIN_IDS) {
+    const ids = env.ADMIN_IDS.split(",").map((s) => s.trim());
+    if (ids.includes(String(userId))) return true;
+  }
+  return false;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// USER REGISTRATION
+// ═══════════════════════════════════════════════════════════════════════════════
+
+async function registerUser(user, env) {
+  const existing = await dbGet(env, "SELECT user_id FROM users WHERE user_id = ?", [user.id]);
+  if (!existing) {
+    await dbRun(
+      env,
+      "INSERT INTO users (user_id, username, first_name, last_name) VALUES (?, ?, ?, ?)",
+      [user.id, user.username || "", user.first_name || "", user.last_name || ""]
+    );
+  } else {
+    await dbRun(
+      env,
+      "UPDATE users SET username = ?, first_name = ?, last_name = ? WHERE user_id = ?",
+      [user.username || "", user.first_name || "", user.last_name || "", user.id]
+    );
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MAIN KEYBOARD
+// ═══════════════════════════════════════════════════════════════════════════════
+
+function mainKeyboard() {
+  return {
+    inline_keyboard: [
+      [{ text: "📚 بخش محتوای آموزشی", callback_data: "content_root" }],
+      [{ text: "💌 پیــام ناشنــاس", callback_data: "anon_msg" }],
+      [{ text: "🫶🏻 پیـــام عـــادی", callback_data: "normal_msg" }],
+    ],
+  };
+}
+
+function backToMainInline() {
+  return {
+    inline_keyboard: [[{ text: "🏠 بازگشت به منوی اصلی", callback_data: "back_main" }]],
+  };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// USER STATE MANAGEMENT
+// ═══════════════════════════════════════════════════════════════════════════════
+
+async function getUserState(userId, env) {
+  return dbGet(env, "SELECT state, data FROM user_states WHERE user_id = ?", [userId]);
+}
+
+async function setUserState(userId, state, data, env) {
+  await dbRun(
+    env,
+    "INSERT OR REPLACE INTO user_states (user_id, state, data) VALUES (?, ?, ?)",
+    [userId, state, data || ""]
+  );
+}
+
+async function clearUserState(userId, env) {
+  await dbRun(env, "DELETE FROM user_states WHERE user_id = ?", [userId]);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CONTENT SECTION — BUILD BUTTONS FOR A PARENT
+// ═══════════════════════════════════════════════════════════════════════════════
+
+async function buildContentKeyboard(parentId, env) {
+  const buttons = await dbAll(
+    env,
+    "SELECT id, name FROM buttons WHERE parent_id = ? AND is_active = 1 ORDER BY order_index, id",
+    [parentId]
+  );
+  const rows = [];
+  for (const btn of buttons) {
+    // Check if this button has children or content
+    const children = await dbAll(env, "SELECT id FROM buttons WHERE parent_id = ? AND is_active = 1", [btn.id]);
+    const contents = await dbAll(env, "SELECT id FROM button_contents WHERE button_id = ?", [btn.id]);
+
+    if (children.length > 0) {
+      // Has sub-buttons — navigate deeper
+      rows.push([{ text: btn.name, callback_data: `content_nav:${btn.id}` }]);
+    } else if (contents.length > 0) {
+      // Has content — show it
+      rows.push([{ text: btn.name, callback_data: `content_show:${btn.id}` }]);
+    } else {
+      // Leaf with no content
+      rows.push([{ text: btn.name, callback_data: `content_empty:${btn.id}` }]);
+    }
+  }
+  // Back button
+  if (parentId === null || parentId === 0) {
+    rows.push([{ text: "🏠 بازگشت به منوی اصلی", callback_data: "back_main" }]);
+  } else {
+    const parent = await dbGet(env, "SELECT parent_id FROM buttons WHERE id = ?", [parentId]);
+    const goBack = parent && parent.parent_id ? parent.parent_id : 0;
+    rows.push([{ text: "🔙 بازگشت", callback_data: `content_nav:${goBack}` }]);
+  }
+  return { inline_keyboard: rows };
+}
+
+async function sendContentMessage(chatId, messageId, parentId, env) {
+  const keyboard = await buildContentKeyboard(parentId === null ? 0 : parentId, env);
+  const parentBtn = parentId ? await dbGet(env, "SELECT name FROM buttons WHERE id = ?", [parentId]) : null;
+  const title = parentBtn ? `📂 ${parentBtn.name}` : "📚 بخش محتوای آموزشی";
+
+  if (messageId) {
+    await editMessageText(chatId, messageId, title, env, { reply_markup: keyboard });
+  } else {
+    await sendMessage(chatId, title, env, { reply_markup: keyboard });
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SEND CONTENT ITEMS FOR A BUTTON
+// ═══════════════════════════════════════════════════════════════════════════════
+
+async function sendContentForButton(chatId, buttonId, env) {
+  const contents = await dbAll(
+    env,
+    "SELECT content_kind, content_text, content_file_id FROM button_contents WHERE button_id = ? ORDER BY order_index, id",
+    [buttonId]
+  );
+
+  if (contents.length === 0) {
+    await sendMessage(chatId, "این بخش خالی است.", env, { reply_markup: backToMainInline() });
+    return;
+  }
+
+  for (const item of contents) {
+    switch (item.content_kind) {
+      case "photo":
+        if (item.content_file_id) {
+          await sendPhoto(chatId, item.content_file_id, env, item.content_text || "");
+        } else {
+          await sendMessage(chatId, item.content_text || "(تصویر بدون فایل)", env);
+        }
+        break;
+      case "video":
+        if (item.content_file_id) {
+          await sendVideo(chatId, item.content_file_id, env, item.content_text || "");
+        } else {
+          await sendMessage(chatId, item.content_text || "(ویدیو بدون فایل)", env);
+        }
+        break;
+      case "document":
+      case "file":
+        if (item.content_file_id) {
+          await sendDocument(chatId, item.content_file_id, env, item.content_text || "");
+        } else {
+          await sendMessage(chatId, item.content_text || "(فایل بدون فایل)", env);
+        }
+        break;
+      case "text":
+      default:
+        if (item.content_text) {
+          await sendMessage(chatId, item.content_text, env);
+        }
+        break;
+    }
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ADMIN PANEL
+// ═══════════════════════════════════════════════════════════════════════════════
+
+function adminKeyboard() {
+  return {
+    inline_keyboard: [
+      [{ text: "📊 آمار ربات", callback_data: "admin_stats" }],
+      [{ text: "📂 مدیریت دکمه‌ها", callback_data: "admin_buttons" }],
+      [{ text: "📝 آپلود محتوا", callback_data: "admin_upload_menu" }],
+      [{ text: "👥 لیست کاربران", callback_data: "admin_users" }],
+    ],
+  };
+}
+
+function adminButtonManagerKeyboard(parentId) {
+  return {
+    inline_keyboard: [
+      [{ text: "➕ اضافه کردن دکمه جدید", callback_data: `admin_add_btn:${parentId || 0}` }],
+      [{ text: "🗑 حذف دکمه انتخابی", callback_data: `admin_del_btn_menu:${parentId || 0}` }],
+      [{ text: "⬆️ تغییر ترتیب", callback_data: `admin_reorder:${parentId || 0}` }],
+      [{ text: "🔙 بازگشت", callback_data: "admin_panel" }],
+    ],
+  };
+}
+
+async function adminButtonTreeMessage(parentId, env) {
+  const buttons = await dbAll(
+    env,
+    "SELECT id, name, is_active FROM buttons WHERE parent_id = ? ORDER BY order_index, id",
+    [parentId]
+  );
+  const rows = [];
+  for (const btn of buttons) {
+    const status = btn.is_active ? "✅" : "❌";
+    rows.push([{ text: `${status} ${btn.name}`, callback_data: `admin_btn_detail:${btn.id}` }]);
+  }
+  rows.push(
+    [{ text: "➕ اضافه کردن دکمه جدید", callback_data: `admin_add_btn:${parentId || 0}` }],
+    [{ text: "🗑 حذف دکمه", callback_data: `admin_del_btn_menu:${parentId || 0}` }],
+    [{ text: "⬆️ تغییر ترتیب", callback_data: `admin_reorder:${parentId || 0}` }],
+    [{ text: "🔙 بازگشت", callback_data: "admin_panel" }]
+  );
+  return { inline_keyboard: rows };
+}
+
+async function showAdminButtons(parentId, chatId, messageId, env) {
+  const keyboard = await adminButtonTreeMessage(parentId, env);
+  const parentBtn = parentId ? await dbGet(env, "SELECT name FROM buttons WHERE id = ?", [parentId]) : null;
+  const title = parentBtn ? `📂 مدیریت دکمه‌ها — ${parentBtn.name}` : "📂 مدیریت دکمه‌ها";
+
+  if (messageId) {
+    await editMessageText(chatId, messageId, title, env, { reply_markup: keyboard });
+  } else {
+    await sendMessage(chatId, title, env, { reply_markup: keyboard });
+  }
+}
+
+async function showAdminStats(chatId, env) {
+  const users = await dbGet(env, "SELECT COUNT(*) as c FROM users");
+  const buttons = await dbGet(env, "SELECT COUNT(*) as c FROM buttons");
+  const contents = await dbGet(env, "SELECT COUNT(*) as c FROM button_contents");
+  const admins = await dbGet(env, "SELECT COUNT(*) as c FROM admins");
+
+  const text = `📊 <b>آمار ربات</b>\n\n` +
+    `👥 کاربران: ${users ? users.c : 0}\n` +
+    `🔘 دکمه‌ها: ${buttons ? buttons.c : 0}\n` +
+    `📝 محتواها: ${contents ? contents.c : 0}\n` +
+    `🔑 ادمین‌ها: ${admins ? admins.c : 0}\n`;
+
+  await sendMessage(chatId, text, env, {
+    reply_markup: { inline_keyboard: [[{ text: "🔙 بازگشت", callback_data: "admin_panel" }]] },
+  });
+}
+
+async function showAdminUsers(chatId, env) {
+  const users = await dbAll(env, "SELECT user_id, username, first_name FROM users ORDER BY user_id DESC LIMIT 30");
+  let text = "👥 <b>لیست کاربران (آخرین ۳۰ نفر)</b>\n\n";
+  for (const u of users) {
+    const name = u.first_name || "";
+    const uname = u.username ? `@${u.username}` : "";
+    text += `• ${u.user_id} | ${name} ${uname}\n`;
+  }
+  if (users.length === 0) text += "هنوز کاربری ثبت نشده.\n";
+
+  await sendMessage(chatId, text, env, {
+    reply_markup: { inline_keyboard: [[{ text: "🔙 بازگشت", callback_data: "admin_panel" }]] },
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ADMIN — ADD BUTTON FLOW
+// ═══════════════════════════════════════════════════════════════════════════════
+
+async function startAddButton(parentId, chatId, env) {
+  await setUserState(chatId, "admin_add_btn_name", String(parentId || 0), env);
+  await sendMessage(chatId, "📝 نام دکمه جدید را وارد کنید:", env, {
+    reply_markup: { inline_keyboard: [[{ text: "لغو", callback_data: "admin_buttons" }]] },
+  });
+}
+
+async function finishAddButton(chatId, btnName, env) {
+  const state = await getUserState(chatId, env);
+  if (!state || state.state !== "admin_add_btn_name") return;
+  const parentId = parseInt(state.data) || null;
+
+  await dbRun(env, "INSERT INTO buttons (parent_id, name) VALUES (?, ?)", [parentId, btnName]);
+  await clearUserState(chatId, env);
+  await sendMessage(chatId, `✅ دکمه «${btnName}» اضافه شد.`, env);
+  await showAdminButtons(parentId, chatId, null, env);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ADMIN — UPLOAD CONTENT FLOW
+// ═══════════════════════════════════════════════════════════════════════════════
+
+async function showUploadMenu(chatId, env) {
+  const buttons = await dbAll(env, "SELECT id, name, parent_id FROM buttons ORDER BY order_index, id");
+  const rows = [];
+  for (const btn of buttons) {
+    const prefix = btn.parent_id ? "  └ " : "";
+    rows.push([{ text: `${prefix}${btn.name}`, callback_data: `admin_upload_select:${btn.id}` }]);
+  }
+  if (rows.length === 0) {
+    rows.push([{ text: "ابتدا یک دکمه بسازید", callback_data: "admin_panel" }]);
+  }
+  rows.push([{ text: "🔙 بازگشت", callback_data: "admin_panel" }]);
+  await sendMessage(chatId, "📝 انتخاب بخش برای آپلود محتوا:", env, { reply_markup: { inline_keyboard: rows } });
+}
+
+async function startUploadContent(buttonId, chatId, env) {
+  const btn = await dbGet(env, "SELECT name FROM buttons WHERE id = ?", [buttonId]);
+  if (!btn) {
+    await sendMessage(chatId, "❌ دکمه یافت نشد.", env);
+    return;
+  }
+  await setUserState(chatId, "admin_upload_wait", String(buttonId), env);
+  await sendMessage(
+    chatId,
+    `📤 محتوای جدید برای «${btn.name}» را ارسال کنید.\n\n` +
+    `پشتیبانی از: متن، عکس، ویدیو، فایل\n` +
+    `برای پایان /done تایپ کنید.`,
+    env,
+    { reply_markup: { inline_keyboard: [[{ text: "پایان آپلود", callback_data: "admin_upload_done" }]] } }
+  );
+}
+
+async function handleUploadContent(message, env) {
+  const state = await getUserState(message.chat.id, env);
+  if (!state || state.state !== "admin_upload_wait") return false;
+
+  const buttonId = parseInt(state.data);
+  if (!buttonId) return false;
+
+  let contentKind = "text";
+  let contentText = "";
+  let contentFileId = "";
+
+  if (message.photo) {
+    contentKind = "photo";
+    contentFileId = message.photo[message.photo.length - 1].file_id;
+    contentText = message.caption || "";
+  } else if (message.video) {
+    contentKind = "video";
+    contentFileId = message.video.file_id;
+    contentText = message.caption || "";
+  } else if (message.document) {
+    contentKind = "document";
+    contentFileId = message.document.file_id;
+    contentText = message.caption || "";
+  } else if (message.text) {
+    contentKind = "text";
+    contentText = message.text;
+  }
+
+  // Get current max order_index
+  const maxOrder = await dbGet(
+    env,
+    "SELECT MAX(order_index) as m FROM button_contents WHERE button_id = ?",
+    [buttonId]
+  );
+  const nextOrder = (maxOrder && maxOrder.m != null) ? maxOrder.m + 1 : 0;
+
+  await dbRun(
+    env,
+    "INSERT INTO button_contents (button_id, order_index, content_kind, content_text, content_file_id) VALUES (?, ?, ?, ?, ?)",
+    [buttonId, nextOrder, contentKind, contentText, contentFileId]
+  );
+
+  await sendMessage(message.chat.id, `✅ محتوا ذخیره شد. (${contentKind})\nمحتوای بعدی را ارسال کنید یا /done بزنید.`, env);
+  return true;
+}
+
+async function finishUpload(chatId, env) {
+  const state = await getUserState(chatId, env);
+  if (!state || state.state !== "admin_upload_wait") return;
+  await clearUserState(chatId, env);
+  await sendMessage(chatId, "✅ آپلود محتوا تمام شد.", env);
+  await sendMessage(chatId, "🔧 پنل مدیریت", env, { reply_markup: adminKeyboard() });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ADMIN — DELETE BUTTON
+// ═══════════════════════════════════════════════════════════════════════════════
+
+async function showDeleteMenu(parentId, chatId, env) {
+  const buttons = await dbAll(
+    env,
+    "SELECT id, name FROM buttons WHERE parent_id = ? ORDER BY order_index, id",
+    [parentId]
+  );
+  const rows = [];
+  for (const btn of buttons) {
+    rows.push([{ text: `🗑 ${btn.name}`, callback_data: `admin_del_btn_confirm:${btn.id}` }]);
+  }
+  rows.push([{ text: "🔙 بازگشت", callback_data: `admin_btn_manage:${parentId || 0}` }]);
+  await sendMessage(chatId, "کدام دکمه را حذف می‌کنید؟", env, { reply_markup: { inline_keyboard: rows } });
+}
+
+async function confirmDeleteButton(buttonId, chatId, env) {
+  const btn = await dbGet(env, "SELECT name FROM buttons WHERE id = ?", [buttonId]);
+  if (!btn) return;
+  await sendMessage(chatId, `آیا از حذف «${btn.name}» مطمئنید؟`, env, {
+    reply_markup: {
+      inline_keyboard: [
+        [
+          { text: "بله حذف شود", callback_data: `admin_del_btn_yes:${buttonId}` },
+          { text: "خیر", callback_data: "admin_buttons" },
+        ],
+      ],
+    },
+  });
+}
+
+async function deleteButton(buttonId, chatId, env) {
+  // Get button info before deleting
+  const btn = await dbGet(env, "SELECT parent_id FROM buttons WHERE id = ?", [buttonId]);
+  // Delete contents
+  await dbRun(env, "DELETE FROM button_contents WHERE button_id = ?", [buttonId]);
+  // Delete children recursively (simple approach)
+  await dbRun(env, "DELETE FROM buttons WHERE parent_id = ?", [buttonId]);
+  // Delete the button itself
+  await dbRun(env, "DELETE FROM buttons WHERE id = ?", [buttonId]);
+  await sendMessage(chatId, "✅ دکمه حذف شد.", env);
+  const parentId = btn ? btn.parent_id : 0;
+  await showAdminButtons(parentId, chatId, null, env);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ADMIN — BUTTON DETAIL (toggle, manage contents)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+async function showButtonDetail(buttonId, chatId, env) {
+  const btn = await dbGet(env, "SELECT * FROM buttons WHERE id = ?", [buttonId]);
+  if (!btn) return;
+
+  const children = await dbAll(env, "SELECT id FROM buttons WHERE parent_id = ?", [buttonId]);
+  const contents = await dbAll(env, "SELECT id, content_kind, content_text FROM button_contents WHERE button_id = ?", [buttonId]);
+
+  let text = `🔘 <b>${btn.name}</b>\n`;
+  text += `وضعیت: ${btn.is_active ? "✅ فعال" : "❌ غیرفعال"}\n`;
+  text += `محافظت محتوا: ${btn.protect_content ? "🔒 بله" : "❌ خیر"}\n`;
+  text += `زیردکمه‌ها: ${children.length}\n`;
+  text += `محتواها: ${contents.length}\n`;
+
+  if (contents.length > 0) {
+    text += `\n📝 محتواها:\n`;
+    for (let i = 0; i < contents.length; i++) {
+      const c = contents[i];
+      const preview = (c.content_text || "").substring(0, 40);
+      text += `  ${i + 1}. [${c.content_kind}] ${preview}${(c.content_text || "").length > 40 ? "..." : ""}\n`;
+    }
+  }
+
+  const rows = [
+    [
+      { text: btn.is_active ? "❌ غیرفعال کردن" : "✅ فعال کردن", callback_data: `admin_toggle_btn:${buttonId}` },
+      { text: btn.protect_content ? "🔓 حذف محافظت" : "🔒 محافظت", callback_data: `admin_protect_btn:${buttonId}` },
+    ],
+    [{ text: "📂 زیردکمه‌ها", callback_data: `admin_btn_manage:${buttonId}` }],
+    [{ text: "📝 آپلود محتوا", callback_data: `admin_upload_select:${buttonId}` }],
+    [{ text: "🗑 حذف محتوا", callback_data: `admin_del_content_menu:${buttonId}` }],
+    [{ text: "✏️ تغییر نام", callback_data: `admin_rename_btn:${buttonId}` }],
+    [{ text: "🔙 بازگشت", callback_data: "admin_buttons" }],
+  ];
+
+  await sendMessage(chatId, text, env, { reply_markup: { inline_keyboard: rows } });
+}
+
+async function toggleButton(buttonId, chatId, env) {
+  const btn = await dbGet(env, "SELECT is_active FROM buttons WHERE id = ?", [buttonId]);
+  if (!btn) return;
+  const newStatus = btn.is_active ? 0 : 1;
+  await dbRun(env, "UPDATE buttons SET is_active = ? WHERE id = ?", [newStatus, buttonId]);
+  await showButtonDetail(buttonId, chatId, env);
+}
+
+async function toggleProtect(buttonId, chatId, env) {
+  const btn = await dbGet(env, "SELECT protect_content FROM buttons WHERE id = ?", [buttonId]);
+  if (!btn) return;
+  const newVal = btn.protect_content ? 0 : 1;
+  await dbRun(env, "UPDATE buttons SET protect_content = ? WHERE id = ?", [newVal, buttonId]);
+  await showButtonDetail(buttonId, chatId, env);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ADMIN — RENAME BUTTON
+// ═══════════════════════════════════════════════════════════════════════════════
+
+async function startRenameButton(buttonId, chatId, env) {
+  await setUserState(chatId, "admin_rename_btn", String(buttonId), env);
+  await sendMessage(chatId, "📝 نام جدید دکمه را وارد کنید:", env, {
+    reply_markup: { inline_keyboard: [[{ text: "لغو", callback_data: `admin_btn_detail:${buttonId}` }]] },
+  });
+}
+
+async function finishRenameButton(chatId, newName, env) {
+  const state = await getUserState(chatId, env);
+  if (!state || state.state !== "admin_rename_btn") return;
+  const buttonId = parseInt(state.data);
+  await dbRun(env, "UPDATE buttons SET name = ? WHERE id = ?", [newName, buttonId]);
+  await clearUserState(chatId, env);
+  await sendMessage(chatId, "✅ نام تغییر کرد.", env);
+  await showButtonDetail(buttonId, chatId, env);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ADMIN — DELETE CONTENT
+// ═══════════════════════════════════════════════════════════════════════════════
+
+async function showDeleteContentMenu(buttonId, chatId, env) {
+  const contents = await dbAll(
+    env,
+    "SELECT id, content_kind, content_text FROM button_contents WHERE button_id = ? ORDER BY order_index, id",
+    [buttonId]
+  );
+  const rows = [];
+  for (const c of contents) {
+    const preview = (c.content_text || "").substring(0, 30);
+    rows.push([
+      { text: `🗑 [${c.content_kind}] ${preview || "بدون متن"}`, callback_data: `admin_del_content_yes:${c.id}:${buttonId}` },
+    ]);
+  }
+  if (rows.length === 0) {
+    rows.push([{ text: "محتوایی وجود ندارد", callback_data: `admin_btn_detail:${buttonId}` }]);
+  }
+  rows.push([{ text: "🔙 بازگشت", callback_data: `admin_btn_detail:${buttonId}` }]);
+  await sendMessage(chatId, "کدام محتوا را حذف می‌کنید؟", env, { reply_markup: { inline_keyboard: rows } });
+}
+
+async function deleteContent(contentId, buttonId, chatId, env) {
+  await dbRun(env, "DELETE FROM button_contents WHERE id = ?", [contentId]);
+  await sendMessage(chatId, "✅ محتوا حذف شد.", env);
+  await showButtonDetail(buttonId, chatId, env);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ADMIN — REORDER BUTTONS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+async function showReorderMenu(parentId, chatId, env) {
+  const buttons = await dbAll(
+    env,
+    "SELECT id, name, order_index FROM buttons WHERE parent_id = ? ORDER BY order_index, id",
+    [parentId]
+  );
+  if (buttons.length < 2) {
+    await sendMessage(chatId, "حداقل ۲ دکمه لازم است.", env, {
+      reply_markup: { inline_keyboard: [[{ text: "🔙 بازگشت", callback_data: "admin_buttons" }]] },
+    });
+    return;
+  }
+
+  const rows = [];
+  for (let i = 0; i < buttons.length; i++) {
+    const btn = buttons[i];
+    const moveUp = i > 0 ? buttons[i - 1].id : null;
+    const moveDown = i < buttons.length - 1 ? buttons[i + 1].id : null;
+    const row = [{ text: `${btn.order_index}. ${btn.name}`, callback_data: "noop" }];
+    if (moveUp) row.push({ text: "⬆️", callback_data: `admin_swap:${btn.id}:${moveUp}:${parentId}` });
+    if (moveDown) row.push({ text: "⬇️", callback_data: `admin_swap:${btn.id}:${moveDown}:${parentId}` });
+    rows.push(row);
+  }
+  rows.push([{ text: "✅ تمام", callback_data: "admin_buttons" }]);
+  await sendMessage(chatId, "ترتیب دکمه‌ها را تغییر دهید:", env, { reply_markup: { inline_keyboard: rows } });
+}
+
+async function swapButtons(btnA, btnB, parentId, chatId, env) {
+  // Get order indices
+  const a = await dbGet(env, "SELECT order_index FROM buttons WHERE id = ?", [btnA]);
+  const b = await dbGet(env, "SELECT order_index FROM buttons WHERE id = ?", [btnB]);
+  if (!a || !b) return;
+
+  // Swap
+  await dbRun(env, "UPDATE buttons SET order_index = ? WHERE id = ?", [b.order_index, btnA]);
+  await dbRun(env, "UPDATE buttons SET order_index = ? WHERE id = ?", [a.order_index, btnB]);
+  await showReorderMenu(parentId, chatId, env);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CALLBACK HANDLER
+// ═══════════════════════════════════════════════════════════════════════════════
+
+async function handleCallback(callback, env) {
+  const chatId = callback.message.chat.id;
+  const messageId = callback.message.message_id;
+  const data = callback.data;
+  const userId = callback.from.id;
+
+  // Ensure tables exist
+  await ensureTables(env);
+
+  // Register user
+  await registerUser(callback.from, env);
+
+  // Check if user is blocked
+  const user = await dbGet(env, "SELECT blocked FROM users WHERE user_id = ?", [userId]);
+  if (user && user.blocked) {
+    await answerCallback(callback.id, env, "شما مسدود شده‌اید.");
+    return;
+  }
+
+  // Check if user is in a text input state — route to text handler
+  const state = await getUserState(userId, env);
+  if (state && state.state) {
+    // Don't interrupt admin flows for callback-based buttons
+    if (state.state === "admin_upload_wait") {
+      // User clicking while in upload mode — ignore callback, let them type
+      await answerCallback(callback.id, env, "لطفاً محتوا را ارسال کنید.");
+      return;
+    }
+  }
+
+  // ─── MAIN MENU ────────────────────────────────────────────────────────────
+  if (data === "back_main") {
+    await answerCallback(callback.id, env);
+    await editMessageText(chatId, messageId, "🏠 منوی اصلی", env, { reply_markup: mainKeyboard() });
+    return;
+  }
+
+  // ─── CONTENT SECTION ──────────────────────────────────────────────────────
+  if (data === "content_root") {
+    await answerCallback(callback.id, env);
+    await sendContentMessage(chatId, messageId, 0, env);
+    return;
+  }
+
+  if (data.startsWith("content_nav:")) {
+    const parentId = parseInt(data.split(":")[1]);
+    await answerCallback(callback.id, env);
+    await sendContentMessage(chatId, messageId, parentId, env);
+    return;
+  }
+
+  if (data.startsWith("content_show:")) {
+    const buttonId = parseInt(data.split(":")[1]);
+    await answerCallback(callback.id, env);
+    await sendContentForButton(chatId, buttonId, env);
+    // Also show navigation back
+    const btn = await dbGet(env, "SELECT parent_id FROM buttons WHERE id = ?", [buttonId]);
+    const parentId = btn && btn.parent_id ? btn.parent_id : 0;
+    await sendContentMessage(chatId, null, parentId, env);
+    return;
+  }
+
+  if (data.startsWith("content_empty:")) {
+    await answerCallback(callback.id, env, "این بخش خالی است.");
+    return;
+  }
+
+  // ─── MESSAGING ────────────────────────────────────────────────────────────
+  if (data === "anon_msg") {
+    await answerCallback(callback.id, env);
+    await setUserState(userId, "waiting_anon_msg", "", env);
+    await sendMessage(chatId, "💌 پیام ناشناس شما را ارسال کنید:\n\nپیام شما ناشناس ارسال می‌شود.", env, {
+      reply_markup: { inline_keyboard: [[{ text: "لغو", callback_data: "cancel_msg" }]] },
+    });
+    return;
+  }
+
+  if (data === "normal_msg") {
+    await answerCallback(callback.id, env);
+    await setUserState(userId, "waiting_normal_msg", "", env);
+    await sendMessage(chatId, "🫶🏻 پیام عادی خود را ارسال کنید:\n\nنام و شناسه شما برای ادمین ارسال می‌شود.", env, {
+      reply_markup: { inline_keyboard: [[{ text: "لغو", callback_data: "cancel_msg" }]] },
+    });
+    return;
+  }
+
+  if (data === "cancel_msg") {
+    await answerCallback(callback.id, env);
+    await clearUserState(userId, env);
+    await editMessageText(chatId, messageId, "❌ لغو شد.", env, { reply_markup: mainKeyboard() });
+    return;
+  }
+
+  // ─── MESSAGE REPLY (admin clicking reply button) ──────────────────────────
+  if (data.startsWith("reply_user:")) {
+    if (!isAdmin(userId, env)) {
+      await answerCallback(callback.id, env, "دسترسی ندارید.");
+      return;
+    }
+    const targetUserId = parseInt(data.split(":")[1]);
+    await answerCallback(callback.id, env);
+    await setUserState(userId, `reply_to:${targetUserId}`, "", env);
+    await sendMessage(chatId, `✍️ پاسخ به کاربر ${targetUserId} را تایپ کنید:`, env, {
+      reply_markup: { inline_keyboard: [[{ text: "لغو", callback_data: "cancel_reply" }]] },
+    });
+    return;
+  }
+
+  if (data === "cancel_reply") {
+    await answerCallback(callback.id, env);
+    await clearUserState(userId, env);
+    await sendMessage(chatId, "لغو شد.", env);
+    return;
+  }
+
+  // ─── ADMIN PANEL ──────────────────────────────────────────────────────────
+  if (data === "admin_panel" || data === "/admin") {
+    if (!isAdmin(userId, env)) {
+      await answerCallback(callback.id, env, "دسترسی ندارید.");
+      return;
+    }
+    await answerCallback(callback.id, env);
+    await clearUserState(userId, env);
+    try {
+      await editMessageText(chatId, messageId, "🔧 پنل مدیریت", env, { reply_markup: adminKeyboard() });
+    } catch {
+      await sendMessage(chatId, "🔧 پنل مدیریت", env, { reply_markup: adminKeyboard() });
+    }
+    return;
+  }
+
+  if (data === "admin_stats") {
+    if (!isAdmin(userId, env)) return;
+    await answerCallback(callback.id, env);
+    await showAdminStats(chatId, env);
+    return;
+  }
+
+  if (data === "admin_users") {
+    if (!isAdmin(userId, env)) return;
+    await answerCallback(callback.id, env);
+    await showAdminUsers(chatId, env);
+    return;
+  }
+
+  // ─── ADMIN — BUTTON MANAGEMENT ────────────────────────────────────────────
+  if (data === "admin_buttons") {
+    if (!isAdmin(userId, env)) return;
+    await answerCallback(callback.id, env);
+    await showAdminButtons(0, chatId, null, env);
+    return;
+  }
+
+  if (data.startsWith("admin_btn_manage:")) {
+    const parentId = parseInt(data.split(":")[1]);
+    if (!isAdmin(userId, env)) return;
+    await answerCallback(callback.id, env);
+    await showAdminButtons(parentId, chatId, null, env);
+    return;
+  }
+
+  if (data.startsWith("admin_btn_detail:")) {
+    const buttonId = parseInt(data.split(":")[1]);
+    if (!isAdmin(userId, env)) return;
+    await answerCallback(callback.id, env);
+    await showButtonDetail(buttonId, chatId, env);
+    return;
+  }
+
+  if (data.startsWith("admin_add_btn:")) {
+    const parentId = parseInt(data.split(":")[1]);
+    if (!isAdmin(userId, env)) return;
+    await answerCallback(callback.id, env);
+    await startAddButton(parentId, chatId, env);
+    return;
+  }
+
+  if (data.startsWith("admin_del_btn_menu:")) {
+    const parentId = parseInt(data.split(":")[1]);
+    if (!isAdmin(userId, env)) return;
+    await answerCallback(callback.id, env);
+    await showDeleteMenu(parentId, chatId, env);
+    return;
+  }
+
+  if (data.startsWith("admin_del_btn_confirm:")) {
+    const buttonId = parseInt(data.split(":")[1]);
+    if (!isAdmin(userId, env)) return;
+    await answerCallback(callback.id, env);
+    await confirmDeleteButton(buttonId, chatId, env);
+    return;
+  }
+
+  if (data.startsWith("admin_del_btn_yes:")) {
+    const buttonId = parseInt(data.split(":")[1]);
+    if (!isAdmin(userId, env)) return;
+    await answerCallback(callback.id, env);
+    await deleteButton(buttonId, chatId, env);
+    return;
+  }
+
+  if (data.startsWith("admin_toggle_btn:")) {
+    const buttonId = parseInt(data.split(":")[1]);
+    if (!isAdmin(userId, env)) return;
+    await answerCallback(callback.id, env);
+    await toggleButton(buttonId, chatId, env);
+    return;
+  }
+
+  if (data.startsWith("admin_protect_btn:")) {
+    const buttonId = parseInt(data.split(":")[1]);
+    if (!isAdmin(userId, env)) return;
+    await answerCallback(callback.id, env);
+    await toggleProtect(buttonId, chatId, env);
+    return;
+  }
+
+  if (data.startsWith("admin_rename_btn:")) {
+    const buttonId = parseInt(data.split(":")[1]);
+    if (!isAdmin(userId, env)) return;
+    await answerCallback(callback.id, env);
+    await startRenameButton(buttonId, chatId, env);
+    return;
+  }
+
+  if (data.startsWith("admin_reorder:")) {
+    const parentId = parseInt(data.split(":")[1]);
+    if (!isAdmin(userId, env)) return;
+    await answerCallback(callback.id, env);
+    await showReorderMenu(parentId, chatId, env);
+    return;
+  }
+
+  if (data.startsWith("admin_swap:")) {
+    const parts = data.split(":");
+    const btnA = parseInt(parts[1]);
+    const btnB = parseInt(parts[2]);
+    const parentId = parseInt(parts[3]);
+    if (!isAdmin(userId, env)) return;
+    await answerCallback(callback.id, env);
+    await swapButtons(btnA, btnB, parentId, chatId, env);
+    return;
+  }
+
+  // ─── ADMIN — UPLOAD CONTENT ───────────────────────────────────────────────
+  if (data === "admin_upload_menu") {
+    if (!isAdmin(userId, env)) return;
+    await answerCallback(callback.id, env);
+    await showUploadMenu(chatId, env);
+    return;
+  }
+
+  if (data.startsWith("admin_upload_select:")) {
+    const buttonId = parseInt(data.split(":")[1]);
+    if (!isAdmin(userId, env)) return;
+    await answerCallback(callback.id, env);
+    await startUploadContent(buttonId, chatId, env);
+    return;
+  }
+
+  if (data === "admin_upload_done") {
+    if (!isAdmin(userId, env)) return;
+    await answerCallback(callback.id, env);
+    await finishUpload(chatId, env);
+    return;
+  }
+
+  // ─── ADMIN — DELETE CONTENT ───────────────────────────────────────────────
+  if (data.startsWith("admin_del_content_menu:")) {
+    const buttonId = parseInt(data.split(":")[1]);
+    if (!isAdmin(userId, env)) return;
+    await answerCallback(callback.id, env);
+    await showDeleteContentMenu(buttonId, chatId, env);
+    return;
+  }
+
+  if (data.startsWith("admin_del_content_yes:")) {
+    const parts = data.split(":");
+    const contentId = parseInt(parts[1]);
+    const buttonId = parseInt(parts[2]);
+    if (!isAdmin(userId, env)) return;
+    await answerCallback(callback.id, env);
+    await deleteContent(contentId, buttonId, chatId, env);
+    return;
+  }
+
+  // ─── UNKNOWN CALLBACK ─────────────────────────────────────────────────────
+  await answerCallback(callback.id, env);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MESSAGE HANDLER
+// ═══════════════════════════════════════════════════════════════════════════════
+
+async function handleMessage(message, env) {
+  // Ensure tables exist
+  await ensureTables(env);
+
+  const userId = message.from.id;
+  const chatId = message.chat.id;
+  const text = message.text || "";
+
+  // Register user
+  await registerUser(message.from, env);
+
+  // Check if user is blocked
+  const user = await dbGet(env, "SELECT blocked FROM users WHERE user_id = ?", [userId]);
+  if (user && user.blocked) return;
+
+  // ─── /start ───────────────────────────────────────────────────────────────
+  if (text === "/start") {
+    await clearUserState(userId, env);
+    const firstName = message.from.first_name || "کاربر";
+    await sendMessage(
+      chatId,
+      `سلام ${firstName}! 👋\n\n` +
+      `به ربات خوش آمدید.\n` +
+      `از منوی زیر استفاده کنید:`,
+      env,
+      { reply_markup: mainKeyboard() }
+    );
+    return;
+  }
+
+  // ─── /admin ───────────────────────────────────────────────────────────────
+  if (text === "/admin" || text === "/admin@") {
+    await clearUserState(userId, env);
+    if (!isAdmin(userId, env)) {
+      await sendMessage(chatId, "❌ شما دسترسی ادمین ندارید.", env);
+      return;
+    }
+    await sendMessage(chatId, "🔧 پنل مدیریت", env, { reply_markup: adminKeyboard() });
+    return;
+  }
+
+  // ─── /done (admin upload finish) ──────────────────────────────────────────
+  if (text === "/done") {
+    const state = await getUserState(userId, env);
+    if (state && state.state === "admin_upload_wait") {
+      await finishUpload(chatId, env);
+      return;
+    }
+  }
+
+  // ─── /cancel ──────────────────────────────────────────────────────────────
+  if (text === "/cancel") {
+    await clearUserState(userId, env);
+    await sendMessage(chatId, "❌ لغو شد.", env, { reply_markup: mainKeyboard() });
+    return;
+  }
+
+  // ─── STATE-BASED ROUTING ──────────────────────────────────────────────────
+  const state = await getUserState(userId, env);
+  if (state && state.state) {
+    // Admin: adding new button name
+    if (state.state === "admin_add_btn_name") {
+      if (!isAdmin(userId, env)) return;
+      await finishAddButton(chatId, text, env);
+      return;
+    }
+
+    // Admin: renaming button
+    if (state.state === "admin_rename_btn") {
+      if (!isAdmin(userId, env)) return;
+      await finishRenameButton(chatId, text, env);
+      return;
+    }
+
+    // Admin: uploading content (text input)
+    if (state.state === "admin_upload_wait") {
+      if (!isAdmin(userId, env)) return;
+      await handleUploadContent(message, env);
+      return;
+    }
+
+    // Admin: replying to user
+    if (state.state.startsWith("reply_to:")) {
+      if (!isAdmin(userId, env)) return;
+      const targetUserId = parseInt(state.state.split(":")[1]);
+      await clearUserState(userId, env);
+      await sendMessage(targetUserId, `💬 پاسخ ادمین:\n\n${text}`, env);
+      await sendMessage(chatId, `✅ پاسخ به ${targetUserId} ارسال شد.`, env);
+      return;
+    }
+
+    // User: anonymous message
+    if (state.state === "waiting_anon_msg") {
+      await clearUserState(userId, env);
+      // Find main admin
+      const mainAdminId = parseInt(env.MAIN_ADMIN_ID);
+      await sendMessage(
+        mainAdminId,
+        `💌 <b>پیام ناشناس جدید</b>\n\n` +
+        `پیام:\n${text}`,
+        env,
+        {
+          reply_markup: {
+            inline_keyboard: [
+              [
+                { text: "💬 پاسخ", callback_data: `reply_user:${userId}` },
+                { text: "🚫 مسدود کردن", callback_data: `ban_user:${userId}` },
+              ],
+            ],
+          },
+        }
+      );
+      // Also send to other admins
+      if (env.ADMIN_IDS) {
+        const adminIds = env.ADMIN_IDS.split(",").map((s) => s.trim());
+        for (const aid of adminIds) {
+          if (String(aid) !== String(mainAdminId)) {
+            try {
+              await sendMessage(
+                parseInt(aid),
+                `💌 <b>پیام ناشناس جدید</b>\n\nپیام:\n${text}`,
+                env
+              );
+            } catch {}
+          }
+        }
+      }
+      await sendMessage(chatId, "✅ پیام شما ناشناس ارسال شد.", env, { reply_markup: mainKeyboard() });
+      return;
+    }
+
+    // User: normal message
+    if (state.state === "waiting_normal_msg") {
+      await clearUserState(userId, env);
+      const mainAdminId = parseInt(env.MAIN_ADMIN_ID);
+      const username = message.from.username ? `@${message.from.username}` : "ندارد";
+      const fullName = [message.from.first_name, message.from.last_name].filter(Boolean).join(" ");
+
+      await sendMessage(
+        mainAdminId,
+        `🫶🏻 <b>پیام عادی جدید</b>\n\n` +
+        `👤 نام: ${fullName}\n` +
+        `🆔 شناسه: ${userId}\n` +
+        `📛 یوزرنیم: ${username}\n\n` +
+        `پیام:\n${text}`,
+        env,
+        {
+          reply_markup: {
+            inline_keyboard: [
+              [
+                { text: "💬 پاسخ", callback_data: `reply_user:${userId}` },
+                { text: "🚫 مسدود کردن", callback_data: `ban_user:${userId}` },
+              ],
+            ],
+          },
+        }
+      );
+      // Also send to other admins
+      if (env.ADMIN_IDS) {
+        const adminIds = env.ADMIN_IDS.split(",").map((s) => s.trim());
+        for (const aid of adminIds) {
+          if (String(aid) !== String(mainAdminId)) {
+            try {
+              await sendMessage(
+                parseInt(aid),
+                `🫶🏻 <b>پیام عادی جدید</b>\n\n👤 ${fullName} | ${userId} | ${username}\n\n${text}`,
+                env
+              );
+            } catch {}
+          }
+        }
+      }
+      await sendMessage(chatId, "✅ پیام شما ارسال شد.", env, { reply_markup: mainKeyboard() });
+      return;
+    }
+  }
+
+  // ─── UNRECOGNIZED MESSAGE ─────────────────────────────────────────────────
+  // If no state, just show main menu
+  await sendMessage(chatId, "لطفاً از منوی زیر استفاده کنید:", env, { reply_markup: mainKeyboard() });
+}

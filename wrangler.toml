@@ -1,20 +1,13 @@
 name = "cf-combined-bot"
 main = "src/index.js"
-compatibility_date = "2024-09-30"
+compatibility_date = "2024-09-23"
 
-# D1 Database
 [[d1_databases]]
 binding = "BOT_DB"
-database_name = "cf-combined-bot-db"
-database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+database_name = "combined-bot-db"
+database_id = "51b5aa88-eb54-4527-bb8e-24383c26e731"
 
-# R2 Bucket (optional — for file/media storage)
-# [[r2_buckets]]
-# binding = "BOT_STORAGE"
-# bucket_name = "cf-combined-bot-storage"
-
-# Environment variables — set via `wrangler secret put` or in dashboard
-# [vars]
-# BOT_TOKEN = "123456:ABC-DEF..."
-# MAIN_ADMIN_ID = "123456789"
-# ADMIN_IDS = "123456789,987654321"
+[vars]
+BOT_TOKEN = "8837691003:AAHbUGmb_B54ejMSYu43DON2e8MDVA-oF4I"
+MAIN_ADMIN_ID = "7510155009"
+ADMIN_IDS = "7510155009,6253351203,1381431348"
