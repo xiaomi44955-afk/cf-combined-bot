@@ -41,7 +41,7 @@ async function editMsg(chatId, msgId, text, env, extra = {}) {
 }
 
 async function safeEditMsg(chatId, msgId, text, env, extra = {}) {
-  try { return await editMsg(chatId, msgId, text, env, extra); } catch (e) { return { ok: false }; }
+  try { return await editMsg(chatId, msgId, text, env, extra); } catch (e) { console.error("safeEditMsg error:", e); return { ok: false }; }
 }
 
 async function answerCb(cbId, env, text = "", showAlert = false) {
@@ -246,6 +246,7 @@ function sessionNameForIndex(idx) {
 // ═══════ MESSAGE HANDLER ═══════
 
 async function handleMessage(message, env) {
+  console.log("MSG:", message.text || "no-text");
   await ensureTables(env);
   const userId = message.from.id;
   const chatId = message.chat.id;
@@ -521,7 +522,8 @@ async function handleMessage(message, env) {
 // ═══════ CALLBACK HANDLER ═══════
 
 async function handleCallback(callback, env) {
-  await ensureTables(env);
+  try { await ensureTables(env); } catch(e) { console.error("ensureTables err:", e); }
+  try {
   const chatId = callback.message.chat.id;
   const msgId = callback.message.message_id;
   const data = callback.data;
@@ -577,6 +579,7 @@ async function handleCallback(callback, env) {
   }
 
   // ═══════ ADMIN CALLBACKS ═══════
+  console.log("Admin check:", userId, isAdmin(userId, env));
   if (!isAdmin(userId, env)) { await answerCb(callback.id, env, "❌ دسترسی ندارید.", true); return; }
 
   if (data === "admin:panel") {
@@ -836,7 +839,7 @@ async function handleCallback(callback, env) {
     } else await sendMsg(chatId, "ℹ️ آپلود فعالی نیست.", env);
     return;
   }
-}
+} catch(err) { console.error("CB err:", err.message); try { await answerCb(callback.id, env, "❌ خطا رخ داد.", true); } catch(e) {} }}
 
 // ═══════ CONTENT DISPLAY ═══════
 
