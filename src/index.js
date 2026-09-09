@@ -6,7 +6,7 @@ export default {
       try {
         const payload = await request.json();
         if (payload.message) await handleMessage(payload.message, env);
-        if (payload.callback_query) await handleCallback(payload.callback_query, env);
+        if (payload.callback_query) ctx.waitUntil(handleCallback(payload.callback_query, env).catch(e => console.error("CB fail:", e)));
       } catch (err) { console.error("Error:", err); }
     }
     return new Response("OK", { status: 200 });
@@ -522,7 +522,6 @@ async function handleMessage(message, env) {
 // ═══════ CALLBACK HANDLER ═══════
 
 async function handleCallback(callback, env) {
-  try { await ensureTables(env); } catch(e) { console.error("ensureTables err:", e); }
   try {
   const chatId = callback.message.chat.id;
   const msgId = callback.message.message_id;
