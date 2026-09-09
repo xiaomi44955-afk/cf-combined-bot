@@ -127,16 +127,17 @@ function removeKeyboard() {
 // ═══════ WELCOME TEXT ═══════
 
 function welcomeText() {
-  // MarkdownV2 format — blockquotes with > prefix
-  // Escape special chars for MarkdownV2
-  function esc(s) { return s.replace(/([_*\[\]()~`>#+\-=|{}.!])/g, "\\$1"); }
   return `🧡 › درود ×͜× رفیق من :)
 
-${esc("اینجا میتونی درخواست و پیشنهاداتو برای ما بفرستی و ما در کمترین زمان ممکن میخونیمیش و حتماً پاسخ میدیم .")}
-> 💌 › پیــام ناشنــاس : ${esc("رفیق من پیامتو که میفرستی ناشناس ارسال میشه و هیچ اطلاعاتی از اکانت شما برای ما معلوم نیست .")}
-> 🫶🏻 › پیـــام عـــادی : ${esc("رفیق من پیامتو ک میفرستی اسم اکانتت مشخصه و برای ما پیداست که از سمت کی پیام دریافت کردیم .")}
-> 📚 › محتــوای آموزشی : ${esc("در این قسمت میتونی محتوای های مختلفی همچون \" پادکست های مشاوره ای ، برنامه های راهبردی و تحصلی ، جزوات و پکیج های درسی و مصاحبه ای و ... \" رو ببینی و دریافت کنی .")}`;
+اینجا میتونی درخواست و پیشنهاداتو برای ما بفرستی و ما در کمترین زمان ممکن میخونیمیش و حتماً پاسخ میدیم .
+
+> 💌 › پیــام ناشنــاس : رفیق من پیامتو که میفرستی ناشناس ارسال میشه و هیچ اطلاعاتی از اکانت شما برای ما معلوم نیست .
+
+> 🫶🏻 › پیـــام عـــادی : رفیق من پیامتو ک میفرستی اسم اکانتت مشخصه و برای ما پیداست که از سمت کی پیام دریافت کردیم .
+
+> 📚 › محتــوای آموزشی : در این قسمت میتونی محتوای های مختلفی همچون " پادکست های مشاوره ای ، برنامه های راهبردی و تحصلی ، جزوات و پکیج های درسی و مصاحبه ای و ... " رو ببینی و دریافت کنی .`;
 }
+
 
 // ═══════ MESSAGE HANDLER ═══════
 
@@ -162,7 +163,7 @@ async function handleMessage(message, env) {
   // ─── /start ───
   if (text === "/start") {
     await clearState(userId, env);
-    await sendMsg(chatId, welcomeText(), env, { parse_mode: "MarkdownV2", reply_markup: mainKeyboard() });
+    await sendMsg(chatId, welcomeText(), env, { reply_markup: mainKeyboard() });
     return;
   }
 
@@ -301,7 +302,7 @@ async function handleMessage(message, env) {
   // ─── USER: "بازگشت" ───
   if (text === "🔙 بازگشت") {
     await clearState(userId, env);
-    await sendMsg(chatId, welcomeText(), env, { parse_mode: "MarkdownV2", reply_markup: mainKeyboard() });
+    await sendMsg(chatId, welcomeText(), env, { reply_markup: mainKeyboard() });
     return;
   }
 
