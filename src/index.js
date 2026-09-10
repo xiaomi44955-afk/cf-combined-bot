@@ -297,8 +297,9 @@ function backToPanelKeyboard() {
 
 // ═══════ WELCOME TEXT ═══════
 
-function welcomeText() {
-  return `🧡 › درود ×͜× رفیق من :)
+function welcomeText(from) {
+  const name = escapeHtml(from?.first_name || from?.username || "عزیز");
+  return `🧡 › درود ${name} رفیق من :)
 
 اینجا میتونی درخواست و پیشنهاداتو برای ما بفرستی و ما در کمترین زمان ممکن میخونیمیش و حتماً پاسخ میدیم .
 <blockquote>💌 › پیــام ناشنــاس : رفیق من پیامتو که میفرستی ناشناس ارسال میشه و هیچ اطلاعاتی از اکانت شما برای ما معلوم نیست .</blockquote>
@@ -424,7 +425,7 @@ async function handleMessage(message, env) {
   // /start
   if (text === "/start") {
     await clearState(userId, env);
-    await sendMsg(chatId, welcomeText(), env, { reply_markup: mainKeyboard() });
+    await sendMsg(chatId, welcomeText(message.from), env, { reply_markup: mainKeyboard() });
     return;
   }
 
@@ -816,7 +817,7 @@ async function handleMessage(message, env) {
 
   if (text === "🔙 بازگشت") {
     await clearState(userId, env);
-    await sendMsg(chatId, welcomeText(), env, { reply_markup: mainKeyboard() });
+    await sendMsg(chatId, welcomeText(message.from), env, { reply_markup: mainKeyboard() });
     return;
   }
 
@@ -901,7 +902,7 @@ async function handleCallback(callback, env) {
     // menu:home / back_main
     if (data === "menu:home" || data === "back_main") {
       await clearState(userId, env);
-      await safeEditMsg(chatId, msgId, welcomeText(), env, { reply_markup: mainKeyboard() });
+      await safeEditMsg(chatId, msgId, welcomeText(callback.from), env, { reply_markup: mainKeyboard() });
       await ack();
       return;
     }
